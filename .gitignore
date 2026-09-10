@@ -1,3 +1,7 @@
+# Geo data, images
+*.tif
+*.gpkg
+
 # History files
 .Rhistory
 .Rapp.history
