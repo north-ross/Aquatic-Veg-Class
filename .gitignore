@@ -1,5 +1,7 @@
 # Geo data, images
 *.tif
+*.tif.aux.xml
+*.qmd
 *.gpkg
 
 # History files
