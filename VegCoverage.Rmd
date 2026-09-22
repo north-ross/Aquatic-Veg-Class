@@ -37,13 +37,21 @@ mergeOrthos <- function(dir){
 
 ## NDVI from Orthos
 
-For each orthophoto, correct reflectances \<0 to zero for all bands, then get NDVI from standard formula.
+For each orthophoto, apply preprocessing, then get NDVI from standard formula.
+
+Preprocessing steps:
+
+1.  Mask shadows by filtering by low NIR values, assign these to null?
+2.  Remove sun glint with Hedley method
 
 ```{r}
 getNdviFromOrtho <- function(merged){
+  
+  
   # clamp values from 0 to 1
-  corrected <- clamp(merged, lower=0, upper=1, values=TRUE)
-  ndvi <- (corrected[[4]] - corrected[[1]]) / (corrected[[4]] + corrected[[1]])
+  clamped <- clamp(merged, lower=0, upper=1, values=TRUE)
+  
+  ndvi <- (clamped[[4]] - clamped[[1]]) / (clamped[[4]] + clamped[[1]])
   return(ndvi)
 }
 ```
@@ -52,8 +60,10 @@ getNdviFromOrtho <- function(merged){
 
 Generate a 10x10m grid covering the image area bounding box. Remove grid cells which don't overlap the lake area. Round the extent coordinates to multiples of 10 (Finnish CRS) so they all align with each other
 
+TODO: restrict this to the image extent? For example for the very large lakes we just did a small area of
+
 ```{r}
-getLakeGrid <- function(lake_outlines, dir){
+getLakeGrid <- function(lake_outlines, dir, merged){
   # Get all lakes with group id matching the current dir
   dir_num <- as.integer(gsub("\\D", "", dir))
   sel_lakes <- lake_outlines[lake_outlines$groupID == dir_num,]
@@ -63,6 +73,7 @@ getLakeGrid <- function(lake_outlines, dir){
   # round to ten to align with other grids
   grid_corner <- round(corner/10, 0)*10
   
+  # 
   lake_grid <- st_make_grid(sel_lakes, cellsize=10, offset=grid_corner)
   return (lake_grid)
 }
@@ -81,7 +92,14 @@ $$c=\frac{1}{n}\sum_{i=1}^n f_i
 
 ```{r}
 getFractionalCoverage <- function(ndvi, grid){
-  
+  # First apply the classification to the NDVI
+  cutoffs <- c(0.1, 0.6)
+  classifiedNDVI <- ifel(ndvi < cutoffs[1], 0,
+                         ifel(ndvi < cutoffs[2], ndvi / (cutoffs[2] - cutoffs[1]), 1))
+  # Now do zonal stats to get mean over the grid
+  # TODO: Handle nodata in raster
+  zonalOut <- zonal(classifiedNDVI, grid, fun="mean")
+  return(zonalOut)
 }
 ```
 
@@ -93,20 +111,27 @@ lake_outlines = st_read('/home/northross/Documents/Thesis_Data/InitialAnalysis/S
 
 for (dir in dirs.list) {
   merged <- mergeOrthos(dir)
+  print(paste("Merged raster", dir))
   ndvi <- getNdviFromOrtho(merged)
-  # export intermediates?
-  grid <- getLakeGrid(lake_outlines, dir)
+  # Export NDVI
+  writeRaster(ndvi, file.path(dir, "ndvi.tif"), overwrite=TRUE)
+  grid <- getLakeGrid(lake_outlines, dir, merged)
   
-  coverage <- getFractionalCoverage(ndvi, grid)
-  # export coverage
+  coverage <- getFractionalCoverage(ndvi, vect(grid))
+  # Write to gpkg
+  st_write(
+    coverage, 
+    dsn=paste("coverages_",Sys.Date(),".gpkg", sep=""), 
+    layer=unlist(strsplit(dir,"/"))[2]
+  )
+  # Clear memory
+  gc()
 }
 ```
 
 # Classify Grid coverage
 
 Spatial join the grid to the polygons generated from plant points and lines. If only one species is present in the grid cell, set that species to 1 and all others to zero.
-
-Next, find the nearest point or line feature and set the
 
 ```{r}
 
