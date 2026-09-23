@@ -17,19 +17,19 @@ For overlapping orthos, merge them together based on their cutlines.
 I used the `mosaic` funtion with `blend` from terra here, but I wonder if I should instead use get the max or average values for overlaps, or if I should do more processing in webodm to normalize their reflectance values between orthos. Also experiment with resampling methods - the default bilinear is probably fine, but I could increase it to cubic
 
 ```{r}
-mergeOrthos <- function(dir){
-  imagesList = list.files(dirs.list[1], pattern="*.tif")
+mergeOrthos <- function(lakeDir){
+  imagesList = list.files(lakeDir, pattern=".*\\.tif$")
   if (length(imagesList) > 1){
     # load rasters
     raw <- c()
     for (f in imagesList){
-      fpath = file.path(dir, f)
+      fpath = file.path(lakeDir, f)
       s <-rast(fpath)
       raw <- c(raw, s)
     }
     out <- do.call(mosaic, (c(raw, fun="blend", resample=TRUE)))
   } else {
-    out <- rast(imagesList[1])
+    out <- rast(file.path(lakeDir, imagesList[1]))
   }
   return(out)
 }
@@ -63,18 +63,13 @@ Generate a 10x10m grid covering the image area bounding box. Remove grid cells w
 TODO: restrict this to the image extent? For example for the very large lakes we just did a small area of
 
 ```{r}
-getLakeGrid <- function(lake_outlines, dir, merged){
-  # Get all lakes with group id matching the current dir
-  dir_num <- as.integer(gsub("\\D", "", dir))
-  sel_lakes <- lake_outlines[lake_outlines$groupID == dir_num,]
-  
+getLakeGrid <- function(ndvi_bbox){
   # Get corner 
-  corner <- st_bbox(sel_lakes)[c("xmin", "ymin")]
+  corner <- st_bbox(ndvi_bbox)[c("xmin", "ymin")]
   # round to ten to align with other grids
   grid_corner <- round(corner/10, 0)*10
   
-  # 
-  lake_grid <- st_make_grid(sel_lakes, cellsize=10, offset=grid_corner)
+  lake_grid <- st_make_grid(ndvi_bbox, cellsize=10, offset=grid_corner)
   return (lake_grid)
 }
 ```
@@ -96,9 +91,10 @@ getFractionalCoverage <- function(ndvi, grid){
   cutoffs <- c(0.1, 0.6)
   classifiedNDVI <- ifel(ndvi < cutoffs[1], 0,
                          ifel(ndvi < cutoffs[2], ndvi / (cutoffs[2] - cutoffs[1]), 1))
+  print("classfied NDVI")
   # Now do zonal stats to get mean over the grid
   # TODO: Handle nodata in raster
-  zonalOut <- zonal(classifiedNDVI, grid, fun="mean")
+  zonalOut <- zonal(classifiedNDVI, grid, fun="mean", na.rm=TRUE, as.polygons=TRUE)
   return(zonalOut)
 }
 ```
@@ -106,26 +102,91 @@ getFractionalCoverage <- function(ndvi, grid){
 ## Execute functions over all ortho
 
 ```{r}
-dirs.list = list.dirs('Orthos')[2:26]
-lake_outlines = st_read('/home/northross/Documents/Thesis_Data/InitialAnalysis/SurveyLakes.gpkg', layer="SurveyLakes")
+# Define helper function to fall back on the cache.export intermediates if exists and specified
+cacheFallback = function(stepFunction, stepArgs, stepOutfile, useCache, exportIntermediates){
+  if (useCache & exists(stepOutfile)) {
+    # Read from output folder if exists and specified
+    stepOutObject <- rast(stepOutfile)
+  } else {
+    # Else call the function to generate, and export if specified
+    stepOutObject <- do.call(stepFunction, list(stepArgs))
+    if (exportIntermediates) {
+      writeRaster(stepOutObject, stepOutfile, overwrite=TRUE)
+      }
+  }
+  return(stepOutObject)
+}
 
-for (dir in dirs.list) {
-  merged <- mergeOrthos(dir)
-  print(paste("Merged raster", dir))
-  ndvi <- getNdviFromOrtho(merged)
-  # Export NDVI
-  writeRaster(ndvi, file.path(dir, "ndvi.tif"), overwrite=TRUE)
-  grid <- getLakeGrid(lake_outlines, dir, merged)
+# Define function to export coverage from ortho
+exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates=TRUE, skipCompleted=TRUE){
+  outdir = file.path(lakeDir, "outputs")
+  dir.create(outdir, showWarnings = FALSE)
+  outCoverageGpkg = paste("coverages_",Sys.Date(),".gpkg", sep="")
+  outCoverageLayer = basename(lakeDir)
   
-  coverage <- getFractionalCoverage(ndvi, vect(grid))
-  # Write to gpkg
-  st_write(
-    coverage, 
-    dsn=paste("coverages_",Sys.Date(),".gpkg", sep=""), 
-    layer=unlist(strsplit(dir,"/"))[2]
-  )
-  # Clear memory
-  gc()
+  # Skip this layer if specified and the output already exists
+  if (skipCompleted & outCoverageLayer %in% st_layers(outCoverageGpkg)$name){
+    print(paste("Already completed", outCoverageLayer))
+    return()
+  } else {
+    print(paste("Running", outCoverageLayer))
+    # Merge rasters
+    merged <- cacheFallback(
+      mergeOrthos, 
+      c(lakeDir), 
+      file.path(outdir, "merged.tif"),
+      useCache, exportIntermediates
+    )
+    print(paste("Merged raster", outCoverageLayer))
+    gc()
+    
+    # Generate NDVI
+    # Merge rasters
+    ndvi <- cacheFallback(
+      getNdviFromOrtho, 
+      c(merged), 
+      file.path(outdir, "ndvi.tif"),
+      useCache, exportIntermediates
+    )
+    print(paste("Got NDVI", outCoverageLayer))
+    gc()
+    # Remove merged grid from memory
+    rm(merged)
+    
+    # Generate grid
+    ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
+    grid <- getLakeGrid(ndvi_bbox)
+    coverage <- getFractionalCoverage(ndvi, vect(grid))
+    print("Got coverage grid")
+    
+    # Write coverage grid to gpkg
+    writeVector(
+      coverage, 
+      filename=outCoverageGpkg, 
+      layer=outCoverageLayer,
+      overwrite=TRUE
+    )
+    gc()
+    return()
+  }
+}
+```
+
+```{r}
+# Remember to mount "new volume" first
+orthos_path = "/media/northross/New Volume/Orthos"
+lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[2:26]
+
+# Set to TRUE to used cached images if they exist
+useCache = TRUE
+
+# Set to true to skip a file if its final output already exists
+skipCompleted = TRUE
+# And whether to export intermediate files
+exportIntermediates = TRUE
+
+for (lakeDir in lakeDirs.list) {
+  exportCoverageFromOrthos(lakeDir, useCache, exportIntermediates, skipCompleted)
 }
 ```
 
@@ -134,5 +195,5 @@ for (dir in dirs.list) {
 Spatial join the grid to the polygons generated from plant points and lines. If only one species is present in the grid cell, set that species to 1 and all others to zero.
 
 ```{r}
-
+lake_outlines = st_read('/home/northross/Documents/Thesis_Data/InitialAnalysis/SurveyLakes.gpkg', layer="SurveyLakes")
 ```
