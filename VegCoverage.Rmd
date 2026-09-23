@@ -6,6 +6,7 @@ output: html_document
 ```{r}
 library(terra)
 library(sf)
+
 ```
 
 # Get Coverage by Grid from Orthos
@@ -27,7 +28,9 @@ mergeOrthos <- function(lakeDir){
       s <-rast(fpath)
       raw <- c(raw, s)
     }
-    out <- do.call(mosaic, (c(raw, fun="blend", resample=TRUE)))
+    # Using the "blend" function uses lots of memory and will probably fail on large ones
+    # out <- do.call(mosaic, (c(raw, fun="blend", resample=TRUE)))
+    out <- do.call(merge, c(raw, resample=TRUE))
   } else {
     out <- rast(file.path(lakeDir, imagesList[1]))
   }
@@ -104,13 +107,15 @@ getFractionalCoverage <- function(ndvi, grid){
 ```{r}
 # Define helper function to fall back on the cache.export intermediates if exists and specified
 cacheFallback = function(stepFunction, stepArgs, stepOutfile, useCache, exportIntermediates){
-  if (useCache & exists(stepOutfile)) {
+  if (useCache & file.exists(stepOutfile)) {
     # Read from output folder if exists and specified
+    print(paste(stepOutfile, "already exists"))
     stepOutObject <- rast(stepOutfile)
   } else {
     # Else call the function to generate, and export if specified
     stepOutObject <- do.call(stepFunction, list(stepArgs))
     if (exportIntermediates) {
+      print(paste("Exporting", stepOutfile))
       writeRaster(stepOutObject, stepOutfile, overwrite=TRUE)
       }
   }
@@ -164,6 +169,7 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
       coverage, 
       filename=outCoverageGpkg, 
       layer=outCoverageLayer,
+      insert=TRUE,
       overwrite=TRUE
     )
     gc()
@@ -175,11 +181,10 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
 ```{r}
 # Remember to mount "new volume" first
 orthos_path = "/media/northross/New Volume/Orthos"
-lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[2:26]
+lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 # Set to TRUE to used cached images if they exist
 useCache = TRUE
-
 # Set to true to skip a file if its final output already exists
 skipCompleted = TRUE
 # And whether to export intermediate files
@@ -187,7 +192,13 @@ exportIntermediates = TRUE
 
 for (lakeDir in lakeDirs.list) {
   exportCoverageFromOrthos(lakeDir, useCache, exportIntermediates, skipCompleted)
+  tmpFiles(remove=TRUE)
 }
+```
+
+```{r}
+# test with single lake
+exportCoverageFromOrthos(lakeDirs.list[3], useCache, exportIntermediates, skipCompleted)
 ```
 
 # Classify Grid coverage
