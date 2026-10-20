@@ -226,7 +226,7 @@ cacheFallback = function(stepFunction, stepArgs, stepOutfile, useCache, exportIn
 }
 
 # Define function to export coverage from ortho
-exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates=TRUE, skipCompleted=TRUE){
+exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates=TRUE, skipCompleted=TRUE){
   outdir = file.path(lakeDir, "outputs")
   dir.create(outdir, showWarnings = FALSE)
   outCoverageGpkg = paste("coverages_",Sys.Date(),".gpkg", sep="")
@@ -235,9 +235,9 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
   # Starting point is the "georeferenced" merged image, if it exists
   # For some of the orthos, I didn't manually georeference them, so use the non-updated version
   georefOrtho <- file.path(outdir, 
-                           paste("merged_clamped_georef_", basename(lakedir), ".tif", sep=""))
+                           paste("merged_clamped_georef_", basename(lakeDir), ".tif", sep=""))
   mergedOrtho <- file.path(outdir, 
-                           paste("merged_clamped_", basename(lakedir), ".tif", sep=""))
+                           paste("merged_clamped_", basename(lakeDir), ".tif", sep=""))
   if (file.exists(georefOrtho)) {
     merged <- rast(georefOrtho)
   } else {
