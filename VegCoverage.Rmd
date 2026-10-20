@@ -123,23 +123,41 @@ Preprocessing:
 2.  Mask shadows by filtering by low NIR values, assign these -1 on NDVI
 
 ```{r}
+# Helper functions for shadows and glint masking
+maskShadows <- function(index, nir, shadow_threshold){
+  ifel(nir < shadow_threshold, -1, index)
+}
+maskGlint <- function(ndvi, glint_mask_path){
+  glint <- vect(glint_mask_path)
+  merged <- mask(ndvi, glint, inverse = TRUE, updatevalue = -1)
+}
+
 getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
-  # mask glint areas if they exist
+  nir <- merged[[4]]
+  red <- merged[[1]]
+  ndvi <- (nir - red) / (nir + red)
+  
+  # mask glint areas if they exist, set to -1
   if(file.exists(glint_mask_path)){
-    glint_mask <- vect(glint_mask_path)
-    merged <- mask(merged, glint_mask, maskvalues=-1)
+    ndvi <- maskGlint(ndvi, glint_mask_path)
   }
   
-  # mask shadows by minimum NIR value
-  
-  
-  ndvi <- (merged[[4]] - merged[[1]]) / (merged[[4]] + merged[[1]])
+  # mask shadows by minimum NIR value, set to -1
+  ndvi <- maskShadows(ndvi, nir, shadow_threshold)
   
   return(ndvi)
 }
 
-getWaviFromOrtho <- function(merged, L=0.5){
-  wavi <- (1+L) * (merged[[4]] - merged[[3]]) / (merged[[4]] + merged[[3]] + L)
+getWaviFromOrtho <- function(merged, glint_mask_path, L=0.5){
+  nir <- merged[[4]]
+  blue <- merged[[3]]
+  wavi <- (1+L) * (nir - blue) / (nir + blue + L)
+  
+  # mask glint areas if they exist, set to -1
+  if(file.exists(glint_mask_path)){
+    ndvi <- maskGlint(ndvi, glint_mask_path)
+  }
+  
   return(wavi)
 }
 ```
@@ -213,6 +231,19 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
   dir.create(outdir, showWarnings = FALSE)
   outCoverageGpkg = paste("coverages_",Sys.Date(),".gpkg", sep="")
   outCoverageLayer = basename(lakeDir)
+  
+  # Starting point is the "georeferenced" merged image, if it exists
+  # For some of the orthos, I didn't manually georeference them, so use the non-updated version
+  georefOrtho <- file.path(outdir, 
+                           paste("merged_clamped_georef_", basename(lakedir), ".tif", sep=""))
+  mergedOrtho <- file.path(outdir, 
+                           paste("merged_clamped_", basename(lakedir), ".tif", sep=""))
+  if (file.exists(georefOrtho)) {
+    merged <- rast(georefOrtho)
+  } else {
+    merged <- rast(mergedOrtho)
+  }
+  
   # Try to check existing layers
   existing_layers <- tryCatch(
     st_layers(outCoverageGpkg)$name,
@@ -227,6 +258,8 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
     print(outCoverageLayer)
     
     # Generate NDVI
+    shadow_threshold <- 0.015
+    glint_mask_path <- file.path(lakeDir, "glint-mask.gpkg")
     ndvi <- cacheFallback(getNdviFromOrtho, c(merged, shadow_threshold, glint_mask_path), 
                           file.path(outdir, "ndvi.tif"),
                           useCache, exportIntermediates
@@ -234,31 +267,31 @@ exportCoverageFromOrthos <- function(lakedir, useCache=TRUE, exportIntermediates
     print(paste("Got NDVI", outCoverageLayer))
     gc()
     
-    # GENERATE WAVI
-    wavi <- cacheFallback(getWaviFromOrtho, c(merged),
+    # Generate WAVI
+    wavi <- cacheFallback(getWaviFromOrtho, c(merged, glint_mask_path),
                           file.path(outdir, "wavi.tif"),
                           useCache, exportIntermediates
     )
     print(paste("Got WAVI", outCoverageLayer))
     gc()
     # Remove merged grid from memory
-    rm(merged)
-
-    # Generate grid
-    ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(wavi)))
-    grid <- getLakeGrid(ndvi_bbox)
-    coverage <- getFractionalCoverage(wavi, vect(grid))
-    print("Got WAVI coverage grid")
-
-    # Write coverage grid to gpkg
-    writeVector(
-      coverage,
-      filename=outCoverageGpkg,
-      layer=outCoverageLayer,
-      insert=TRUE,
-      overwrite=TRUE
-    )
-    gc()
+      rm(merged)
+  
+      # Generate grid
+      ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
+      grid <- getLakeGrid(ndvi_bbox)
+      coverage <- getFractionalCoverage(ndvi, vect(grid))
+      print("Got NDVI coverage grid")
+  
+      # Write coverage grid to gpkg
+      writeVector(
+        coverage,
+        filename=outCoverageGpkg,
+        layer=outCoverageLayer,
+        insert=TRUE,
+        overwrite=TRUE
+      )
+      gc()
     return()
   }
 }
@@ -270,7 +303,7 @@ orthos_path = "/media/northross/New Volume/Orthos"
 lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 # Set to TRUE to used cached images if they exist
-useCache = TRUE
+useCache = FALSE
 # Set to true to skip a file if its final output already exists
 skipCompleted = FALSE
 # And whether to export intermediate files
