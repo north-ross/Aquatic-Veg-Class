@@ -13,105 +13,7 @@ library(sf)
 
 ## Pre-processing
 
-For orthos that contain cutline polygons, crop to their associated cutline area and merge using "first". Also "clamp" the values from 0 to 1 for all bands to remove erroneous high or low values.
-
-Next, I will manually georeference these images in QGIS based on the NLS ortho. Using the "linear" transform with nearest neighbour interpolation so that the pixel values aren't changed for the NDVI. If there are any "glint" areas, I'll remove these as well
-
-```{r}
-# Set bands 1-5 to NA wherever the alpha band (6) is 0, then drop alpha
-maskAlpha <- function(r){
-  alpha <- r[[6]]
-  mask(r[[1:5]], alpha, maskvalues = 0)   # cells where alpha == 0 become NA
-}
-
-mergeOrthos <- function(lakeDir){
-  imagesList = list.files(lakeDir, pattern=".*\\.tif$")
-  
-  outdir = file.path(lakeDir, "outputs")
-  dir.create(outdir, showWarnings = FALSE)
-  outFile = file.path(outdir, paste("merged_clamped_", basename(lakeDir), ".tif", sep=""))
-  
-  # If there is more than one raster, merge
-  if (length(imagesList) > 1){
-    # load rasters
-    raw <- c()
-    for (f in imagesList){
-      fpath = file.path(lakeDir, f)
-      # if cutline geopackages exist, mask to that
-      cutline = gsub("-orthophoto.tif", "-cutline.gpkg", fpath)
-      
-      s <- maskAlpha(rast(fpath))
-      if (file.exists(cutline)) {
-        cutline_poly <- vect(cutline, layer="cutline")
-        s <- mask(s, cutline_poly)
-      }
-      raw <- c(raw, s)
-    }
-    out <- do.call(merge, (c(raw, resample=TRUE)))
-  } else {
-    # if there is just one raster, read it, masking alpha band
-    out <- maskAlpha(rast(file.path(lakeDir, imagesList[1])))
-  }
-  # clamp values from 0 to 1
-  out <- clamp(out, lower=0, upper=1, values=TRUE)
-  writeRaster(out, outFile, overwrite=TRUE)
-}
-```
-
-```{r}
-# Remember to mount "new volume" first
-orthos_path = "/media/northross/New Volume/Orthos"
-lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
-
-for (lakeDir in lakeDirs.list) {
-  mergeOrthos(lakeDir)
-  tmpFiles(remove=TRUE)
-}
-```
-
-### After georeferencing in QGIS, get the difference between new and old alignment
-
-```{r}
-compareGeoref <- function(orig_path, new_path) {
-  a <- rast(orig_path)
-  b <- rast(new_path)
-  
-  # Corners of each raster extent: xmin/xmax/ymin/ymax
-  ea <- ext(a); eb <- ext(b)
-  
-  # Origin = upper-left corner (xmin, ymax)
-  origin_dist <- sqrt((xmin(eb) - xmin(ea))^2 + (ymax(eb) - ymax(ea))^2)
-  
-  # All four corners, to catch changes from scaling
-  corners <- function(e) cbind(
-    x = c(xmin(e), xmax(e), xmax(e), xmin(e)),
-    y = c(ymax(e), ymax(e), ymin(e), ymin(e))
-  )
-  ca <- corners(ea); cb <- corners(eb)
-  corner_dists <- sqrt(rowSums((cb - ca)^2))
-  names(corner_dists) <- c("UL", "UR", "LR", "LL")
-  
-  return(list(
-    mean_corner_shift = mean(corner_dists),
-    origin_shift = origin_dist,
-    corner_shifts = corner_dists,
-    res_original = res(a),
-    res_new = res(b),
-    dx = xmin(eb) - xmin(ea),
-    dy = ymax(eb) - ymax(ea)
-  ))
-}
-
-for (lakeDir in lakeDirs.list) {
-  outdir = file.path(lakeDir, "outputs")
-  mergedOrtho = file.path(outdir, paste("merged_clamped_", basename(lakeDir), ".tif", sep=""))
-  georefOrtho = file.path(outdir, paste("merged_clamped_georef_", basename(lakeDir), ".tif", sep=""))
-  if (file.exists(georefOrtho)){
-    print(basename(lakeDir))
-    print(compareGeoref(mergedOrtho, georefOrtho))
-  }
-}
-```
+See Pre-processing.Rmd
 
 ## NDVI from Orthos
 
@@ -155,7 +57,7 @@ getWaviFromOrtho <- function(merged, glint_mask_path, L=0.5){
   
   # mask glint areas if they exist, set to -1
   if(file.exists(glint_mask_path)){
-    ndvi <- maskGlint(ndvi, glint_mask_path)
+    wavi <- maskGlint(wavi, glint_mask_path)
   }
   
   return(wavi)
@@ -216,7 +118,7 @@ cacheFallback = function(stepFunction, stepArgs, stepOutfile, useCache, exportIn
     stepOutObject <- rast(stepOutfile)
   } else {
     # Else call the function to generate, and export if specified
-    stepOutObject <- do.call(stepFunction, list(stepArgs))
+    stepOutObject <- do.call(stepFunction, stepArgs)
     if (exportIntermediates) {
       print(paste("Exporting", stepOutfile))
       writeRaster(stepOutObject, stepOutfile, overwrite=TRUE)
@@ -258,9 +160,12 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
     print(outCoverageLayer)
     
     # Generate NDVI
-    shadow_threshold <- 0.015
     glint_mask_path <- file.path(lakeDir, "glint-mask.gpkg")
-    ndvi <- cacheFallback(getNdviFromOrtho, c(merged, shadow_threshold, glint_mask_path), 
+    ndvi <- cacheFallback(getNdviFromOrtho, 
+                          list(
+                            merged = merged,
+                            shadow_threshold = 0.015, 
+                            glint_mask_path = glint_mask_path), 
                           file.path(outdir, "ndvi.tif"),
                           useCache, exportIntermediates
     )
@@ -268,7 +173,10 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
     gc()
     
     # Generate WAVI
-    wavi <- cacheFallback(getWaviFromOrtho, c(merged, glint_mask_path),
+    wavi <- cacheFallback(getWaviFromOrtho, 
+                          list(
+                            merged = merged,
+                            glint_mask_path = glint_mask_path), 
                           file.path(outdir, "wavi.tif"),
                           useCache, exportIntermediates
     )
@@ -303,9 +211,9 @@ orthos_path = "/media/northross/New Volume/Orthos"
 lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 # Set to TRUE to used cached images if they exist
-useCache = FALSE
+useCache = TRUE
 # Set to true to skip a file if its final output already exists
-skipCompleted = FALSE
+skipCompleted = TRUE
 # And whether to export intermediate files
 exportIntermediates = TRUE
 
@@ -322,4 +230,5 @@ for (lakeDir in lakeDirs.list) {
 
 ```{r}
 lake_outlines = st_read('/home/northross/Documents/Thesis_Data/InitialAnalysis/SurveyLakes.gpkg', layer="SurveyLakes")
+
 ```
