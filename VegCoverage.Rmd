@@ -50,6 +50,19 @@ getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
   return(ndvi)
 }
 
+getNdaviFromOrtho <- function(merged, glint_mask_path){
+  nir <- merged[[4]]
+  blue <- merged[[3]]
+  ndavi <- (nir - blue) / (nir + blue)
+  
+  # mask glint areas if they exist, set to -1
+  if(file.exists(glint_mask_path)){
+    ndavi <- maskGlint(ndavi, glint_mask_path)
+  }
+  
+  return(ndavi)
+}
+
 getWaviFromOrtho <- function(merged, glint_mask_path, L=0.5){
   nir <- merged[[4]]
   blue <- merged[[3]]
@@ -172,6 +185,15 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
     print(paste("Got NDVI", outCoverageLayer))
     gc()
     
+    # Generate NDAVI
+    ndavi <- cacheFallback(getNdaviFromOrtho, 
+                           list(
+                             merged = merged,
+                             glint_mask_path = glint_mask_path), 
+                           file.path(outdir, "ndavi.tif"),
+                           useCache, exportIntermediates
+    )
+    
     # Generate WAVI
     wavi <- cacheFallback(getWaviFromOrtho, 
                           list(
@@ -213,7 +235,7 @@ lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 # Set to TRUE to used cached images if they exist
 useCache = TRUE
 # Set to true to skip a file if its final output already exists
-skipCompleted = TRUE
+skipCompleted = FALSE
 # And whether to export intermediate files
 exportIntermediates = TRUE
 
@@ -225,10 +247,17 @@ for (lakeDir in lakeDirs.list) {
 
 # Classify Grid coverage
 
-1.  Manually combine all the field notes into polygon fields representing the extents of different plant species, and also the lake boundaries
-2.  Join the lake boundary
+1.  Manually combine all the field notes into polygon fields representing the extents of different plant species, and also the lake boundaries. Add the land area as a polygon
+
+2.  Join to the coverage grid from earlier, adding an attribute for each class. This attribute is calculated from the following formula for species $k$: $$ c_\text{k}=  \frac{A_k}{\sum A} c $$
+
+    Where $c_k$ is the coverage for species $k$, $A_k$ is the intersection of the area polygon with this cell, $\sum A$ is the total area of all polygons overlapping this cell and $c$ is the overall coverage as calculated from NDVI above. Note that if only one species is present, $A_k = \sum A$.
+
+    We still need to account for different species having different densities - perhaps multi species cells should be handled as their own case?
 
 ```{r}
-lake_outlines = st_read('/home/northross/Documents/Thesis_Data/InitialAnalysis/SurveyLakes.gpkg', layer="SurveyLakes")
+VegPolys = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
+lakeGrid = st_read('coverages_2026-10-20.gpkg', layer='01_Orajarvi')
+
 
 ```
