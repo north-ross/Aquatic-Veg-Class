@@ -2,7 +2,8 @@
 *.tif
 *.tif.aux.xml
 *.qmd
-*.gpkg
+*.gpkg*
+*.qgz
 
 # Private
 .private/*
