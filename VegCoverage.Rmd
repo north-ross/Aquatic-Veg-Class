@@ -15,7 +15,7 @@ library(sf)
 
 See Pre-processing.Rmd
 
-## NDVI from Orthos
+## Vegetation indices
 
 For each orthophoto, apply preprocessing, then get NDVI from standard formula.
 
@@ -23,6 +23,21 @@ Preprocessing:
 
 1.  Mask glint areas based on the attached polygon, assign these to -1 on NDVI
 2.  Mask shadows by filtering by low NIR values, assign these -1 on NDVI
+3.  Mask terrestrial areas from the VegClassPoly, assign these to NA
+
+### NDAVI / WAVI
+
+These are just NDVI except with blue instead of red. They seem to work better at detecting floating-leaved vegetation in deep water, but struggle with differentiating from glint and shallow water compared to NDVI.
+
+### GNDVI
+
+This index, the also called "NDWI" and usually used to differentiate water from other non-vegetated areas, was useful in this Korean aquatic veg study (Song and Park 2020), it's just NDVI but with green instead of red
+
+### EVI
+
+Coefficient values from <https://doi.org/10.1016/j.rsase.2025.101711>: G=2.5, L=0.16, C1 = 6, C2 = 7.5
+
+$$\text{EVI}=G \times \frac {(\text{NIR}-\text{Red})} {({\text{NIR}} + C_{1} \times {\text{Red}}-C_{2} \times {\text{Blue}}+L)}$$
 
 ```{r}
 # Helper functions for shadows and glint masking
@@ -35,7 +50,7 @@ maskGlint <- function(ndvi, glint_mask_path){
 }
 
 getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
-  nir <- merged[[5]]
+  nir <- merged[[4]]
   red <- merged[[1]]
   ndvi <- (nir - red) / (nir + red)
   
@@ -52,7 +67,7 @@ getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
 }
 
 getNdaviFromOrtho <- function(merged, glint_mask_path){
-  nir <- merged[[5]]
+  nir <- merged[[4]]
   blue <- merged[[3]]
   ndavi <- (nir - blue) / (nir + blue)
   
@@ -64,8 +79,8 @@ getNdaviFromOrtho <- function(merged, glint_mask_path){
   return(ndavi)
 }
 
-getWaviFromOrtho <- function(merged, glint_mask_path, L=0.5){
-  nir <- merged[[5]]
+getWaviFromOrtho <- function(merged, glint_mask_path, G=2.5, L=1){
+  nir <- merged[[4]]
   blue <- merged[[3]]
   wavi <- (1+L) * (nir - blue) / (nir + blue + L)
   
@@ -75,6 +90,33 @@ getWaviFromOrtho <- function(merged, glint_mask_path, L=0.5){
   }
   names(wavi) <- "wavi"
   return(wavi)
+}
+
+getGndviFromOrtho <- function(merged, glint_mask_path){
+  nir <- merged[[4]]
+  green <- merged[[2]]
+  gndvi <- (nir - green) / (nir + green)
+  
+  # mask glint areas if they exist, set to -1
+  if(file.exists(glint_mask_path)){
+    gndvi <- maskGlint(gndvi, glint_mask_path)
+  }
+  names(gndvi) <- "gndvi"
+  return(gndvi)
+}
+
+getEviFromOrtho <- function(merged, glint_mask_path, G=2.5,  L=0.16){
+  nir <- merged[[4]]
+  blue <- merged[[3]]
+  red <- merged[[1]]
+  evi <- G * (nir - red) / (nir + (6*red) - (7.5*blue) + L)
+  
+  # mask glint areas if they exist, set to -1
+  if(file.exists(glint_mask_path)){
+    evi <- maskGlint(evi, glint_mask_path)
+  }
+  names(evi) <- "evi"
+  return(evi)
 }
 ```
 
@@ -206,26 +248,41 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
                           file.path(outdir, "wavi.tif"),
                           useCache, exportIntermediates
     )
-    print(paste("Got WAVI", outCoverageLayer))
+    # Generate WAVI
+    gndvi <- cacheFallback(getGndviFromOrtho, 
+                          list(
+                            merged = merged,
+                            glint_mask_path = glint_mask_path), 
+                          file.path(outdir, "gndvi.tif"),
+                          useCache, exportIntermediates
+    )
+    # Generate WAVI
+    evi <- cacheFallback(getEviFromOrtho, 
+                          list(
+                            merged = merged,
+                            glint_mask_path = glint_mask_path), 
+                          file.path(outdir, "evi.tif"),
+                          useCache, exportIntermediates
+    )
     gc()
     # Remove merged grid from memory
-      rm(merged)
-  
-      # Generate grid
-      ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
-      grid <- getLakeGrid(ndvi_bbox)
-      coverage <- getFractionalCoverage(ndvi, vect(grid))
-      print("Got NDVI coverage grid")
-  
-      # Write coverage grid to gpkg
-      writeVector(
-        coverage,
-        filename=outCoverageGpkg,
-        layer=outCoverageLayer,
-        insert=TRUE,
-        overwrite=TRUE
-      )
-      gc()
+    rm(merged)
+
+    # Generate grid
+    ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
+    grid <- getLakeGrid(ndvi_bbox)
+    coverage <- getFractionalCoverage(ndvi, vect(grid))
+    print("Got NDVI coverage grid")
+
+    # Write coverage grid to gpkg
+    writeVector(
+      coverage,
+      filename=outCoverageGpkg,
+      layer=outCoverageLayer,
+      insert=TRUE,
+      overwrite=TRUE
+    )
+    gc()
     return()
   }
 }
@@ -237,7 +294,7 @@ orthos_path = "/media/northross/New Volume/Orthos"
 lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 # Set to TRUE to used cached images if they exist
-useCache = FALSE
+useCache = TRUE
 # Set to true to skip a file if its final output already exists
 skipCompleted = FALSE
 # And whether to export intermediate files
@@ -266,10 +323,10 @@ library(tidyr)
 ```
 
 ```{r}
-lake = "01_Orajarvi"
+lake = "02_Riipijarvi"
 
 classes = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
-grid = st_read('coverages_2026-10-20.gpkg', layer=lake)
+grid = st_read('coverages_2026-10-26.gpkg', layer=lake)
 
 # Verify overlap and CRS
 classes <- classes |> st_transform(st_crs(grid)) |> st_make_valid()
@@ -291,11 +348,13 @@ class_cov <- pieces |>
   group_by(grid_id, Class) |>
   summarise(area = sum(area), .groups = "drop") |>   # merge multiple polys of same class
   group_by(grid_id) |>
-  mutate(weight = area / sum(area)) |>               # = 1 when only one class
+  mutate(weight = area / sum(area)) |> 
   ungroup() |>
   left_join(st_drop_geometry(grid) |> select(grid_id, coverage), by = "grid_id") |>
   mutate(class_coverage = coverage * weight) |>
   select(grid_id, Class, class_coverage)
+
+# TODO: Add correction based on expected density per class.
 
 # ---- 3. Unknown: coverage but no class polygon ---------------------------
 unknown <- grid |>
@@ -313,12 +372,12 @@ grid_out <- grid |>
   left_join(wide, by = "grid_id") |>
   mutate(across(all_of(class_cols), ~ replace_na(.x, 0)))
 
-# ---- Sanity check: class fields should sum back to total coverage --------
+# Check that all classes add up to total coverage
 check <- grid_out |>
   st_drop_geometry() |>
   mutate(total = rowSums(across(all_of(class_cols))),
          diff  = abs(total - coverage))
 stopifnot(all(check$diff < 1e-9 | is.na(check$diff)))
 
-st_write(grid_out, "coverage_by_class.gpkg", layer = lake, delete_layer = TRUE)
+st_write(grid_out, "coverage_by_class_1.gpkg", layer = lake, delete_layer = TRUE)
 ```
