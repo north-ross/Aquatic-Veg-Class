@@ -41,12 +41,25 @@ $$\text{EVI}=G \times \frac {(\text{NIR}-\text{Red})} {({\text{NIR}} + C_{1} \ti
 
 ```{r}
 # Helper functions for shadows and glint masking
-maskShadows <- function(index, nir, shadow_threshold){
+maskShadows <- function(index, nir, shadow_threshold = 0.015){
   ifel(nir < shadow_threshold, -1, index)
 }
 maskGlint <- function(ndvi, glint_mask_path){
   glint <- vect(glint_mask_path)
-  merged <- mask(ndvi, glint, inverse = TRUE, updatevalue = -1)
+  
+  # Boolean subsets 
+  glint_veg   <- glint[glint$contains_veg %in% TRUE]
+  glint_water <- glint[!(glint$contains_veg %in% TRUE)]
+  
+  # Glint with vegetation -> NA (exclude from analysis)
+  if (nrow(glint_veg) > 0) {
+    ndvi <- mask(ndvi, glint_veg, inverse = TRUE, updatevalue = NA)
+  }
+  # Glint without vegetation -> -1 (treat as water)
+  if (nrow(glint_water) > 0) {
+    ndvi <- mask(ndvi, glint_water, inverse = TRUE, updatevalue = -1)
+  }
+  ndvi
 }
 
 getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
@@ -54,13 +67,13 @@ getNdviFromOrtho <- function(merged, shadow_threshold, glint_mask_path){
   red <- merged[[1]]
   ndvi <- (nir - red) / (nir + red)
   
+  # mask shadows by minimum NIR value, set to -1
+  ndvi <- maskShadows(ndvi, nir, shadow_threshold)
+  
   # mask glint areas if they exist, set to -1
   if(file.exists(glint_mask_path)){
     ndvi <- maskGlint(ndvi, glint_mask_path)
   }
-  
-  # mask shadows by minimum NIR value, set to -1
-  ndvi <- maskShadows(ndvi, nir, shadow_threshold)
   
   names(ndvi) <- "ndvi"
   return(ndvi)
@@ -111,12 +124,19 @@ getEviFromOrtho <- function(merged, glint_mask_path, G=2.5,  L=0.16){
   red <- merged[[1]]
   evi <- G * (nir - red) / (nir + (6*red) - (7.5*blue) + L)
   
+  # mask shadows by minimum NIR value, set to -1
+  evi <- maskShadows(evi, nir)
   # mask glint areas if they exist, set to -1
   if(file.exists(glint_mask_path)){
     evi <- maskGlint(evi, glint_mask_path)
   }
   names(evi) <- "evi"
   return(evi)
+}
+
+getEviNoTt <-function(evi, Tt){
+  eviNoTt <- mask(evi, Tt, inverse=TRUE, updatevalue = NA)
+  return(eviNoTt)
 }
 ```
 
@@ -152,7 +172,7 @@ $$c=\frac{1}{n}\sum_{i=1}^n f_i
 ```{r}
 getFractionalCoverage <- function(ndvi, grid){
   # First apply the classification to the NDVI
-  cutoffs <- c(0.1, 0.6)
+  cutoffs <- c(0, 0.6)
   classifiedNDVI <- ifel(ndvi < cutoffs[1], 0,
                          ifel(ndvi < cutoffs[2], ndvi / (cutoffs[2] - cutoffs[1]), 1))
   print("classfied NDVI")
@@ -256,7 +276,7 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
                           file.path(outdir, "gndvi.tif"),
                           useCache, exportIntermediates
     )
-    # Generate WAVI
+    # Generate EVI
     evi <- cacheFallback(getEviFromOrtho, 
                           list(
                             merged = merged,
@@ -264,6 +284,14 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
                           file.path(outdir, "evi.tif"),
                           useCache, exportIntermediates
     )
+    # Mask terrestrial areas from EVI
+    eviMask <- cacheFallback(getEviNoTt,
+                             list(
+                               evi = evi, 
+                               Tt = Tt),
+                             file.path(outdir, "evi_masked.tif"),
+                             useCache, exportIntermediates
+                             )
     gc()
     # Remove merged grid from memory
     rm(merged)
@@ -271,8 +299,8 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
     # Generate grid
     ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
     grid <- getLakeGrid(ndvi_bbox)
-    coverage <- getFractionalCoverage(ndvi, vect(grid))
-    print("Got NDVI coverage grid")
+    coverage <- getFractionalCoverage(evi, vect(grid))
+    print("Got EVI coverage grid")
 
     # Write coverage grid to gpkg
     writeVector(
@@ -292,9 +320,11 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
 # Remember to mount "new volume" first
 orthos_path = "/media/northross/New Volume/Orthos"
 lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
+classes = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
+Tt = classes[classes$Class == "Tt",]
 
 # Set to TRUE to used cached images if they exist
-useCache = TRUE
+useCache = FALSE
 # Set to true to skip a file if its final output already exists
 skipCompleted = FALSE
 # And whether to export intermediate files
@@ -310,9 +340,9 @@ for (lakeDir in lakeDirs.list) {
 
 1.  Manually combine all the field notes into polygon fields representing the extents of different plant species, and also the lake boundaries. Add the land area as a polygon
 
-2.  Join to the coverage grid from earlier, adding an attribute for each class. This attribute is calculated from the following formula for species $k$: $$ c_\text{k}=  \frac{A_k}{\sum A} c $$
+2.  Join to the coverage grid from earlier, adding an attribute for each class. This attribute is calculated from the following formula for species $k$: $$ c_{k_1} =  \frac{A_{k_1} \bar{c}_{k_1}} {\sum_{k=1} ^ n A_k \bar c_k}  c $$
 
-    Where $c_k$ is the coverage for species $k$, $A_k$ is the intersection of the area polygon with this cell, $\sum A$ is the total area of all polygons overlapping this cell and $c$ is the overall coverage as calculated from NDVI above. Note that if only one species is present, $A_k = \sum A$.
+    Where $c_k$ is the coverage for species $k$, $A_k$ is the intersection of the area polygon with this cell, $\sum A$ is the total area of all polygons overlapping this cell, $\bar {c_k}$ is the average coverage for cells containing ONLY species $k$, and $c$ is the overall coverage as calculated from NDVI above. Note that if only one species is present, $A_k = \sum A$ and $\bar c_k = \sum \bar c$
 
     We still need to account for different species having different densities - perhaps multi species cells should be handled as their own case?
 
@@ -322,62 +352,104 @@ library(dplyr)
 library(tidyr)
 ```
 
+Function to create a classified grid
+
+TODO: Add coefficient for relative veg converage densities. Calculated similar to area, but using the mean coverage of single-species cells
+
 ```{r}
-lake = "02_Riipijarvi"
+classifyGrid <- function(gpkg, lake, classes){
+  grid = st_read(gpkg, layer=lake)
+  # Verify overlap and CRS
+  classes <- classes |> st_transform(st_crs(grid)) |> st_make_valid()
+  
+  grid <- grid |>
+    mutate(grid_id = row_number())
+  
+  # ---- 1. Overlay: one row per (grid cell x class polygon) piece ---------
+  pieces <- st_intersection(
+    select(grid, grid_id),
+    select(classes, Class)
+  ) |>
+    st_collection_extract("POLYGON") |>  # drop stray lines/points from edge touches
+    mutate(area = as.numeric(st_area(geom))) |>
+    st_drop_geometry()
+  
+  # ---- 2. Weights per cell ------------------------------------------------
+  class_cov <- pieces |>
+    group_by(grid_id, Class) |>
+    summarise(area = sum(area), .groups = "drop") |>   # merge multiple polys of same class
+    group_by(grid_id) |>
+    mutate(weight = area / sum(area)) |> 
+    ungroup() |>
+    left_join(st_drop_geometry(grid) |> select(grid_id, coverage), by = "grid_id") |>
+    mutate(class_coverage = coverage * weight) |>
+    select(grid_id, Class, class_coverage)
+  
+  # TODO: Add correction based on expected density per class.
+  
+  # ---- 3. Unknown: coverage but no class polygon ---------------------------
+  unknown <- grid |>
+    st_drop_geometry() |>
+    filter(coverage > 0, !grid_id %in% class_cov$grid_id) |>
+    transmute(grid_id, Class = "unknown", class_coverage = coverage)
+  
+  # ---- 4. Wide format and join back to the grid ----------------------------
+  wide <- bind_rows(class_cov, unknown) |>
+    pivot_wider(names_from = Class, values_from = class_coverage, values_fill = 0)
+  
+  class_cols <- setdiff(names(wide), "grid_id")
+  
+  grid_out <- grid |>
+    left_join(wide, by = "grid_id") |>
+    mutate(across(all_of(class_cols), ~ replace_na(.x, 0)))
+  
+  # Check that all classes add up to total coverage
+  check <- grid_out |>
+    st_drop_geometry() |>
+    mutate(total = rowSums(across(all_of(class_cols))),
+           diff  = abs(total - coverage))
+  stopifnot(all(check$diff < 1e-9 | is.na(check$diff)))
+  
+  # st_write(grid_out, "coverage_by_class_1.gpkg", layer = lake, delete_layer = TRUE)
+  
+  # TODO: Drop all NA coverages
+  return(grid_out)
+}
+```
+
+```{r}
+# Define starting variables
+orthos_path = "/media/northross/New Volume/Orthos"
+lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 classes = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
-grid = st_read('coverages_2026-10-26.gpkg', layer=lake)
+coverages_gpkg = 'coverages_2026-11-21.gpkg'
 
-# Verify overlap and CRS
-classes <- classes |> st_transform(st_crs(grid)) |> st_make_valid()
+datalist <- vector("list", length=25)
 
-grid <- grid |>
-  mutate(grid_id = row_number())
+for (lakeDir in lakeDirs.list){
+  lake <- basename(lakeDir)
+  lakeGrid <- classifyGrid(coverages_gpkg, lake, classes)
+  # Add column for lakeID
+  groupID <- as.integer(substr(lake, 0, 2))
+  lakeGrid$groupID <- groupID
+  datalist[[groupID]] <- lakeGrid
+}
 
-# ---- 1. Overlay: one row per (grid cell x class polygon) piece ---------
-pieces <- st_intersection(
-  select(grid, grid_id),
-  select(classes, Class)
-) |>
-  st_collection_extract("POLYGON") |>  # drop stray lines/points from edge touches
-  mutate(area = as.numeric(st_area(geom))) |>
-  st_drop_geometry()
+classified_coverages <- bind_rows(datalist)
+st_write(classified_coverages, "coverage_by_class.gpkg", delete_layer = TRUE)
+```
 
-# ---- 2. Weights per cell ------------------------------------------------
-class_cov <- pieces |>
-  group_by(grid_id, Class) |>
-  summarise(area = sum(area), .groups = "drop") |>   # merge multiple polys of same class
-  group_by(grid_id) |>
-  mutate(weight = area / sum(area)) |> 
-  ungroup() |>
-  left_join(st_drop_geometry(grid) |> select(grid_id, coverage), by = "grid_id") |>
-  mutate(class_coverage = coverage * weight) |>
-  select(grid_id, Class, class_coverage)
-
-# TODO: Add correction based on expected density per class.
-
-# ---- 3. Unknown: coverage but no class polygon ---------------------------
-unknown <- grid |>
-  st_drop_geometry() |>
-  filter(coverage > 0, !grid_id %in% class_cov$grid_id) |>
-  transmute(grid_id, Class = "unknown", class_coverage = coverage)
-
-# ---- 4. Wide format and join back to the grid ----------------------------
-wide <- bind_rows(class_cov, unknown) |>
-  pivot_wider(names_from = Class, values_from = class_coverage, values_fill = 0)
-
-class_cols <- setdiff(names(wide), "grid_id")
-
-grid_out <- grid |>
-  left_join(wide, by = "grid_id") |>
-  mutate(across(all_of(class_cols), ~ replace_na(.x, 0)))
-
-# Check that all classes add up to total coverage
-check <- grid_out |>
-  st_drop_geometry() |>
-  mutate(total = rowSums(across(all_of(class_cols))),
-         diff  = abs(total - coverage))
-stopifnot(all(check$diff < 1e-9 | is.na(check$diff)))
-
-st_write(grid_out, "coverage_by_class_1.gpkg", layer = lake, delete_layer = TRUE)
+```{r}
+# group by lake ID and get sum
+cov_by_lake <- classified_coverages |>  
+  filter(!is.na(coverage)) |>
+  select(groupID,coverage, Nu, Spg) |>
+  group_by(groupID) |>
+  summarise(
+    Nu = sum(Nu/coverage, na.rm = TRUE),
+    NuMean = mean(Nu, na.rm = TRUE), NuSd = sd(Nu, na.rm = TRUE),
+    Spg = sum(Spg/coverage, na.rm = TRUE),
+    SpgMean = mean(Spg, na.rm = TRUE), SpgSd = sd(Spg, na.rm = TRUE)
+  )
 ```
