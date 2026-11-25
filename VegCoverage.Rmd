@@ -162,6 +162,8 @@ getLakeGrid <- function(ndvi_bbox){
 
 Using the following algorithm, get the fractional coverage over the grid.
 
+TODO: remove cells that are partially null? Or record the non-null area?
+
 $$c=\frac{1}{n}\sum_{i=1}^n f_i 
 \begin{cases}
     1,  &0.6 \le x_i \\
@@ -187,6 +189,8 @@ getFractionalCoverage <- function(ndvi, grid){
 ```
 
 ## Execute functions over all ortho
+
+I export each coverage as its own layer in the geopackage so that I keep some progress in case of an error. I merge them all back again later.
 
 ```{r}
 # Define helper function to fall back on the cache.export intermediates if exists and specified
@@ -299,8 +303,8 @@ exportCoverageFromOrthos <- function(lakeDir, useCache=TRUE, exportIntermediates
     # Generate grid
     ndvi_bbox <- st_as_sf(st_as_sfc(st_bbox(ndvi)))
     grid <- getLakeGrid(ndvi_bbox)
-    coverage <- getFractionalCoverage(evi, vect(grid))
-    print("Got EVI coverage grid")
+    coverage <- getFractionalCoverage(eviMask, vect(grid))
+    print("Got EVI coverage grid, EVI masked")
 
     # Write coverage grid to gpkg
     writeVector(
@@ -324,11 +328,11 @@ classes = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
 Tt = classes[classes$Class == "Tt",]
 
 # Set to TRUE to used cached images if they exist
-useCache = FALSE
+useCache = TRUE
 # Set to true to skip a file if its final output already exists
-skipCompleted = FALSE
+skipCompleted = TRUE
 # And whether to export intermediate files
-exportIntermediates = TRUE
+exportIntermediates = FALSE
 
 for (lakeDir in lakeDirs.list) {
   exportCoverageFromOrthos(lakeDir, useCache, exportIntermediates, skipCompleted)
@@ -343,8 +347,6 @@ for (lakeDir in lakeDirs.list) {
 2.  Join to the coverage grid from earlier, adding an attribute for each class. This attribute is calculated from the following formula for species $k$: $$ c_{k_1} =  \frac{A_{k_1} \bar{c}_{k_1}} {\sum_{k=1} ^ n A_k \bar c_k}  c $$
 
     Where $c_k$ is the coverage for species $k$, $A_k$ is the intersection of the area polygon with this cell, $\sum A$ is the total area of all polygons overlapping this cell, $\bar {c_k}$ is the average coverage for cells containing ONLY species $k$, and $c$ is the overall coverage as calculated from NDVI above. Note that if only one species is present, $A_k = \sum A$ and $\bar c_k = \sum \bar c$
-
-    We still need to account for different species having different densities - perhaps multi species cells should be handled as their own case?
 
 ```{r}
 library(sf)
@@ -401,6 +403,7 @@ classifyGrid <- function(gpkg, lake, classes){
   
   grid_out <- grid |>
     left_join(wide, by = "grid_id") |>
+    filter(!is.na(coverage)) |>
     mutate(across(all_of(class_cols), ~ replace_na(.x, 0)))
   
   # Check that all classes add up to total coverage
@@ -410,25 +413,22 @@ classifyGrid <- function(gpkg, lake, classes){
            diff  = abs(total - coverage))
   stopifnot(all(check$diff < 1e-9 | is.na(check$diff)))
   
-  # st_write(grid_out, "coverage_by_class_1.gpkg", layer = lake, delete_layer = TRUE)
-  
-  # TODO: Drop all NA coverages
   return(grid_out)
 }
 ```
 
 ```{r}
 # Define starting variables
-orthos_path = "/media/northross/New Volume/Orthos"
-lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
+# orthos_path = "/media/northross/New Volume/Orthos"
+# lakeDirs.list = list.dirs(orthos_path, recursive=FALSE)[1:25]
 
 classes = st_read('gpkg/VegClassPolys.gpkg', layer="VegClassPolys")
-coverages_gpkg = 'coverages_2026-11-21.gpkg'
+coverages_gpkg = 'coverages_2026-11-24.gpkg'
+lakeList <- st_layers(coverages_gpkg)$name
 
-datalist <- vector("list", length=25)
+datalist <- vector("list", length=length(lakeList))
 
-for (lakeDir in lakeDirs.list){
-  lake <- basename(lakeDir)
+for (lake in lakeList){
   lakeGrid <- classifyGrid(coverages_gpkg, lake, classes)
   # Add column for lakeID
   groupID <- as.integer(substr(lake, 0, 2))
@@ -436,20 +436,27 @@ for (lakeDir in lakeDirs.list){
   datalist[[groupID]] <- lakeGrid
 }
 
-classified_coverages <- bind_rows(datalist)
-st_write(classified_coverages, "coverage_by_class.gpkg", delete_layer = TRUE)
+df <- bind_rows(datalist)
+# Fill NAs with 0
+df[is.na(df)] <- 0
+
+st_write(df, "coverage_by_class_Tmask.gpkg", delete_layer = TRUE)
 ```
+
+## Summarize coverage by lake
 
 ```{r}
 # group by lake ID and get sum
-cov_by_lake <- classified_coverages |>  
-  filter(!is.na(coverage)) |>
+cov_by_lake <- df |>
+  # Exclude Koutujarvi for now
+  
   select(groupID,coverage, Nu, Spg) |>
   group_by(groupID) |>
   summarise(
-    Nu = sum(Nu/coverage, na.rm = TRUE),
+    covMean = mean(coverage),
+    NuSum = sum(Nu),
     NuMean = mean(Nu, na.rm = TRUE), NuSd = sd(Nu, na.rm = TRUE),
-    Spg = sum(Spg/coverage, na.rm = TRUE),
+    SpgSum = sum(Spg),
     SpgMean = mean(Spg, na.rm = TRUE), SpgSd = sd(Spg, na.rm = TRUE)
   )
 ```
