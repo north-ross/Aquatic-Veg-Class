@@ -443,6 +443,18 @@ df[is.na(df)] <- 0
 st_write(df, "coverage_by_class_Tmask.gpkg", delete_layer = TRUE)
 ```
 
+## Get average coverage by single-class cell, use this to adjust classified coverage in multi-class cells
+
+```{r}
+# Get list of classes
+classList <- names(table(classes$Class))
+
+# Mean value of non-zero, single-species cell
+mean(df[df$Nu > 0, "Nu"])$Nu
+mean(df[df$Nu > 0 & df$coverage - df$Nu < 0.00001, "Nu"]$Nu)
+mean(df[df$Nu > 0 & df$coverage - df$Nu == 0, "Nu"]$Nu)
+```
+
 ## Summarize coverage by lake
 
 ```{r}
@@ -459,4 +471,10 @@ cov_by_lake <- df |>
     SpgSum = sum(Spg),
     SpgMean = mean(Spg, na.rm = TRUE), SpgSd = sd(Spg, na.rm = TRUE)
   )
+```
+
+```{r}
+# plot(cov_by_lake$covMean, type="l", ylim=c(0,1))
+plot(cov_by_lake$NuMean, col="red", type="l")
+lines(cov_by_lake$SpgMean, col="green")
 ```
